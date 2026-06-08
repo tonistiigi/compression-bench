@@ -88,6 +88,9 @@
   }};
 
   const envs=Object.keys(DATA.envs).sort();
+  // Fixed method order across every chart and every selection, so bars don't
+  // reshuffle when you switch environment/image/level.
+  const methodOrder=uniq(rows.map(r=>r.method)).sort();
   const state={ env:envs[0]||"", image:"", level:"" };
 
   const sub=()=>rows.filter(r=>r.env===state.env&&r.image===state.image&&r.level===state.level);
@@ -148,12 +151,9 @@
     const buffers=uniq(s.map(r=>r.bufferSize)).sort(sortNum);
     const jcs=uniq(s.map(r=>r.jc)).sort(sortNum);
     const maxBuf=buffers[buffers.length-1], minJc=jcs[0];
-    // order methods by compress throughput (desc) at the reference slice
-    const methods=uniq(s.map(r=>r.method)).sort((a,b)=>{
-      const va=(pick(a,'compress',minJc,maxBuf)||{}).mbps||0;
-      const vb=(pick(b,'compress',minJc,maxBuf)||{}).mbps||0;
-      return vb-va;
-    });
+    // Consistent, selection-independent method order (methods absent in this
+    // slice render as gaps, keeping every column in the same place).
+    const methods=methodOrder;
 
     const nlayers=(s[0]||{}).numLayers||1;
     const jcNote = jcs.length>1 ? `grouped by job concurrency` : `jc=${minJc} (1 layer)`;
