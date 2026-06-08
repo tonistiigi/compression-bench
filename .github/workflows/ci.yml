@@ -1,0 +1,38 @@
+name: ci
+
+# Basic checks on every push and PR: formatting, vet, build, and unit tests —
+# in both the pure-Go and the cgo (zstd binding) build modes.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
+
+      - name: build + test with cgo zstd
+        run: |
+          CGO_ENABLED=1 go build -tags cgo_zstd ./...
+          CGO_ENABLED=1 go test -tags cgo_zstd ./...

@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>compression-bench report</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --panel:#ffffff; --line:#e6e8ec; --fg:#1c2330; --mut:#6b7480;
+    --accent:#2f6df6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{padding:28px 32px 22px}
+  h1{margin:0;font-size:20px;font-weight:650}
+  .sub{color:var(--mut);font-size:13px;margin-top:6px}
+  main{max-width:1180px;margin:0 auto;padding:0 32px 56px}
+  .controls{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-end;margin:8px 0 28px}
+  .ctl{display:flex;flex-direction:column;gap:6px}
+  .ctl label{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+  select{background:var(--panel);color:var(--fg);border:1px solid var(--line);
+    border-radius:9px;padding:9px 12px;font-size:14px;min-width:160px;
+    box-shadow:0 1px 2px rgba(20,30,50,.04)}
+  select:focus{outline:none;border-color:var(--accent)}
+  .grid{display:grid;grid-template-columns:1fr;gap:24px}
+  @media(min-width:860px){.grid{grid-template-columns:1fr 1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:20px 22px;box-shadow:0 1px 3px rgba(20,30,50,.05)}
+  .card h2{margin:0;font-size:15px;font-weight:600}
+  .card .hint{color:var(--mut);font-size:12.5px;margin:5px 0 16px}
+  .chart{position:relative;height:300px}
+  .empty{color:var(--mut);padding:40px 0;text-align:center;font-size:13px}
+  code{background:#eef1f5;padding:1px 6px;border-radius:5px;font-size:12.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>compression-bench report</h1>
+  <div class="sub" id="meta"></div>
+</header>
+<main>
+  <div class="controls" id="controls"></div>
+  <div class="grid" id="grid">
+    <div class="card"><h2>Compress throughput</h2><p class="hint" id="h-ct"></p><div class="chart"><canvas id="c-ct"></canvas></div></div>
+    <div class="card"><h2>Decompress throughput</h2><p class="hint" id="h-dt"></p><div class="chart"><canvas id="c-dt"></canvas></div></div>
+    <div class="card"><h2>Compression ratio</h2><p class="hint" id="h-ra"></p><div class="chart"><canvas id="c-ra"></canvas></div></div>
+    <div class="card"><h2>Memory churn per op</h2><p class="hint" id="h-mem"></p><div class="chart"><canvas id="c-mem"></canvas></div></div>
+    <div class="card"><h2>Buffer-size effect (compress)</h2><p class="hint" id="h-buf"></p><div class="chart"><canvas id="c-buf"></canvas></div></div>
+  </div>
+</main>
+
+<script src="chart.umd.js"></script>
+<script id="benchdata" type="application/json">__DATA__</script>
+<script>
+(function(){
+  const DATA = JSON.parse(document.getElementById('benchdata').textContent);
+  const rows = DATA.rows || [];
+  if(!rows.length){ document.getElementById('grid').innerHTML='<div class="empty">No results. Run <code>compbench run</code> first.</div>'; return; }
+
+  // palette for grouping dimensions (jc / op / buffer)
+  const GROUP = ["#2f6df6","#f59e2c","#16a36a","#b45cf0"];
+  const uniq=a=>[...new Set(a)];
+  const sortNum=(a,b)=>a-b;
+
+  Chart.defaults.font.family='-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
+  Chart.defaults.color='#6b7480';
+  Chart.defaults.plugins.legend.labels.boxWidth=12;
+  Chart.defaults.plugins.legend.labels.boxHeight=12;
+
+  // draws stddev whiskers; reads dataset.errors[i] (absolute, same units as value)
+  const errorBars={ id:'errorBars', afterDatasetsDraw(chart){
+    const ctx=chart.ctx, y=chart.scales.y;
+    chart.data.datasets.forEach((ds,di)=>{
+      if(!ds.errors) return;
+      chart.getDatasetMeta(di).data.forEach((bar,i)=>{
+        const e=ds.errors[i], v=ds.data[i];
+        if(!e||v==null) return;
+        const yT=y.getPixelForValue(v+e), yB=y.getPixelForValue(Math.max(v-e,0)), x=bar.x, cap=4;
+        ctx.save(); ctx.strokeStyle='rgba(40,50,65,.55)'; ctx.lineWidth=1.2;
+        ctx.beginPath();
+        ctx.moveTo(x,yT); ctx.lineTo(x,yB);
+        ctx.moveTo(x-cap,yT); ctx.lineTo(x+cap,yT);
+        ctx.moveTo(x-cap,yB); ctx.lineTo(x+cap,yB);
+        ctx.stroke(); ctx.restore();
+      });
+    });
+  }};
+
+  const envs=Object.keys(DATA.envs).sort();
+  const state={ env:envs[0]||"", image:"", level:"" };
+
+  const sub=()=>rows.filter(r=>r.env===state.env&&r.image===state.image&&r.level===state.level);
+  const imagesFor=e=>uniq(rows.filter(r=>r.env===e).map(r=>r.image)).sort();
+  const levelsFor=()=>uniq(rows.filter(r=>r.env===state.env&&r.image===state.image).map(r=>r.level)).sort();
+  const pick=(m,op,jc,buf)=>sub().find(r=>r.method===m&&r.op===op&&r.jc===jc&&r.bufferSize===buf);
+
+  function reconcile(){
+    const im=imagesFor(state.env); if(!im.includes(state.image)) state.image=im[0]||"";
+    const lv=levelsFor(); if(!lv.includes(state.level)) state.level=lv.includes("default")?"default":(lv[0]||"");
+  }
+
+  function buildControls(){
+    const c=document.getElementById('controls'); c.innerHTML="";
+    const mk=(label,options,val,on)=>{
+      const w=document.createElement('div'); w.className='ctl';
+      const l=document.createElement('label'); l.textContent=label; w.appendChild(l);
+      const s=document.createElement('select');
+      options.forEach(o=>{const e=document.createElement('option');e.value=o;e.textContent=o;if(o==val)e.selected=true;s.appendChild(e);});
+      s.onchange=()=>on(s.value); w.appendChild(s); c.appendChild(w);
+    };
+    mk("Environment",envs,state.env,v=>{state.env=v;reconcile();render();});
+    mk("Image",imagesFor(state.env),state.image,v=>{state.image=v;reconcile();render();});
+    mk("Level",levelsFor(),state.level,v=>{state.level=v;render();});
+  }
+
+  let charts=[];
+  function draw(canvasId, labels, datasets, yTitle){
+    const el=document.getElementById(canvasId);
+    const c=new Chart(el,{ type:'bar',
+      data:{labels, datasets},
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        animation:false,
+        scales:{
+          y:{beginAtZero:true, title:{display:!!yTitle,text:yTitle,color:'#6b7480'},
+             grid:{color:'#eef1f5'}},
+          x:{grid:{display:false}, ticks:{maxRotation:0, autoSkip:false}},
+        },
+        plugins:{ legend:{display:datasets.length>1, position:'top', align:'end'} }
+      },
+      plugins:[errorBars]
+    });
+    charts.push(c);
+  }
+  const humanBuf=n=> n%1048576===0?(n/1048576)+"MiB":n%1024===0?(n/1024)+"KiB":n+"B";
+
+  function render(){
+    buildControls();
+    charts.forEach(c=>c.destroy()); charts=[];
+
+    const e=DATA.envs[state.env]||{};
+    document.getElementById('meta').innerHTML=
+      `${DATA.runs} run(s) · generated ${DATA.generated} · <code>${state.env}</code> `+
+      `(${e.cpuModel||e.arch}, ${e.numCPU} cores, ${e.goVersion}${e.cgoEnabled?", cgo":""})`;
+
+    const s=sub();
+    const buffers=uniq(s.map(r=>r.bufferSize)).sort(sortNum);
+    const jcs=uniq(s.map(r=>r.jc)).sort(sortNum);
+    const maxBuf=buffers[buffers.length-1], minJc=jcs[0];
+    // order methods by compress throughput (desc) at the reference slice
+    const methods=uniq(s.map(r=>r.method)).sort((a,b)=>{
+      const va=(pick(a,'compress',minJc,maxBuf)||{}).mbps||0;
+      const vb=(pick(b,'compress',minJc,maxBuf)||{}).mbps||0;
+      return vb-va;
+    });
+
+    const nlayers=(s[0]||{}).numLayers||1;
+    const jcNote = jcs.length>1 ? `grouped by job concurrency` : `jc=${minJc} (1 layer)`;
+
+    // throughput datasets grouped by jc, at the largest buffer
+    const tput=op=>jcs.map((jc,i)=>({
+      label:`jc=${jc}`, backgroundColor:GROUP[i%GROUP.length], borderRadius:4, categoryPercentage:.7, barPercentage:.9,
+      data:methods.map(m=>{const r=pick(m,op,jc,maxBuf);return r?r.mbps:null;}),
+      errors:methods.map(m=>{const r=pick(m,op,jc,maxBuf);return r?r.mbps*r.stddevPct/100:null;}),
+    }));
+
+    document.getElementById('h-ct').innerHTML=`${state.image} · ${nlayers} layers · level <code>${state.level}</code> · buf ${humanBuf(maxBuf)} · ${jcNote} · whiskers = ±stddev`;
+    document.getElementById('h-dt').innerHTML=document.getElementById('h-ct').innerHTML;
+    draw('c-ct', methods, tput('compress'), 'MB/s');
+    draw('c-dt', methods, tput('decompress'), 'MB/s');
+
+    // ratio (single dataset, compress)
+    document.getElementById('h-ra').innerHTML=`compress · buf ${humanBuf(maxBuf)} · jc=${minJc} · higher is smaller output`;
+    draw('c-ra', methods, [{label:'ratio', backgroundColor:'#16a36a', borderRadius:4,
+      data:methods.map(m=>{const r=pick(m,'compress',minJc,maxBuf);return r?r.ratio:null;})}], 'ratio (in/out)');
+
+    // memory grouped by op (pure-Go only; others null)
+    document.getElementById('h-mem').innerHTML=`Go-heap allocation churn for the whole image · buf ${humanBuf(maxBuf)} · jc=${minJc} · cgo/external = off-heap (blank)`;
+    const memDs=['compress','decompress'].map((op,i)=>({
+      label:op, backgroundColor:GROUP[i%GROUP.length], borderRadius:4,
+      data:methods.map(m=>{const r=pick(m,op,minJc,maxBuf);return (r&&r.bytesAllocated>0)?r.bytesAllocated/1048576:null;}),
+    }));
+    draw('c-mem', methods, memDs, 'MiB / op');
+
+    // buffer effect (compress, grouped by buffer, jc=min)
+    document.getElementById('h-buf').innerHTML=`compress throughput · jc=${minJc} · grouped by copy-buffer size · whiskers = ±stddev`;
+    const bufDs=buffers.map((b,i)=>({
+      label:humanBuf(b), backgroundColor:GROUP[i%GROUP.length], borderRadius:4,
+      data:methods.map(m=>{const r=pick(m,'compress',minJc,b);return r?r.mbps:null;}),
+      errors:methods.map(m=>{const r=pick(m,'compress',minJc,b);return r?r.mbps*r.stddevPct/100:null;}),
+    }));
+    draw('c-buf', methods, bufDs, 'MB/s');
+  }
+
+  reconcile();
+  render();
+})();
+</script>
+</body>
+</html>

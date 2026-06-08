@@ -1,0 +1,26 @@
+# compbench configuration — see DESIGN.md for the full schema.
+images:
+  - alpine:3.23
+  - golang:1.26
+
+methods:
+  - stdlib-gzip
+  - kp-gzip
+  - kp-pgzip
+  - kp-zstd
+  - zstd-cgo               # skipped unless built with `-tags cgo_zstd` (CGO_ENABLED=1)
+  - external: { name: pigz,     cmd: [pigz, "-{level}", -c], decmd: [pigz, -d, -c] }
+  - external: { name: zstd-cli, cmd: [zstd, "-{level}", -c], decmd: [zstd, -d, -c],
+                rawLevels: { fast: "1", default: "3" } }
+
+# "best" (gzip -9 / zstd-19) is omitted: slow for marginal ratio gain. A method
+# can still opt in with its own `levels:`, e.g. `- { name: kp-zstd, levels: [fast, default, best] }`.
+levels: [fast, default]
+ops: [compress, decompress]
+bufferSizes: [64KiB, 1MiB]
+jobConcurrency: [1, 2]
+iterations: 3
+gap: 500ms
+
+corpus: .corpus
+results: results
